@@ -3,25 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Invoice Scanner Pro</title>
+    <title>Invoice Scanner Pro - Spatial Edition</title>
     
-    <!-- React & ReactDOM -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     
-    <!-- Babel for JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
-    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- PDF.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     </script>
 
-    <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
 
     <style>
@@ -45,16 +40,52 @@
         const { useState, useEffect, useRef } = React;
         
         // --- VERSION CONTROL ---
-        const APP_VERSION = "v1.0"; 
+        const APP_VERSION = "v2.0 (Spatial)"; 
 
-        // --- Logic Engine ---
+        // --- NEW LOGIC ENGINE (SPATIAL EXTRACTION) ---
 
+        // 1. Spatial Sorting Helper
+        // Converts raw PDF items into clean, sorted lines based on Y-coordinates
+        const organizePDFTextByRow = async (pdfPage) => {
+            const textContent = await pdfPage.getTextContent();
+            const items = textContent.items;
+
+            // Group items by Y-coordinate (tolerance of 6px handles slightly misaligned text)
+            const rows = {};
+            items.forEach(item => {
+                // PDF coordinates start from bottom-left. 
+                // We round Y to nearest 6 to group words that are visually on the same line.
+                const y = Math.round(item.transform[5] / 6) * 6; 
+                if (!rows[y]) rows[y] = [];
+                rows[y].push({
+                    text: item.str,
+                    x: item.transform[4] // X position (horizontal)
+                });
+            });
+
+            // 1. Sort rows from Top to Bottom (Higher Y value = Top of page in PDF land)
+            const sortedY = Object.keys(rows).sort((a, b) => b - a);
+            
+            // 2. Sort words inside each row from Left to Right, then join them
+            return sortedY.map(y => {
+                const rowItems = rows[y].sort((a, b) => a.x - b.x);
+                // Join with a space to make a clean sentence
+                return rowItems.map(item => item.text).join(" ").trim(); 
+            }).filter(line => line.length > 0); // Remove empty lines
+        };
+
+        // 2. Safe Calculator (Prevents Crashes)
         const calculateTerms = (dateStr, totalStr) => {
             const res = { netTotal: '', discountAmount: '', discountTotal: '', discountDate: '', netDate: '' };
+            
+            // SAFETY: If inputs are missing/empty, return blanks immediately
             if (!dateStr || !totalStr) return res;
 
             try {
-                const totalNum = parseFloat(totalStr.replace(/[^0-9.]/g, ''));
+                // Remove currency symbols, commas, and spaces to get raw number
+                const cleanTotal = totalStr.replace(/[^0-9.]/g, '');
+                const totalNum = parseFloat(cleanTotal);
+                
                 if (isNaN(totalNum)) return res;
 
                 res.netTotal = "$" + totalNum.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
@@ -62,7 +93,15 @@
                 res.discountAmount = "$" + discountVal.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
                 res.discountTotal = "$" + (totalNum - discountVal).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
-                const [m, d, y] = dateStr.split('/').map(n => parseInt(n));
+                // Robust Date Parsing
+                const parts = dateStr.split('/');
+                if (parts.length < 3) return res; // Safety check
+
+                const m = parseInt(parts[0], 10);
+                const d = parseInt(parts[1], 10);
+                let y = parseInt(parts[2], 10);
+                
+                // Handle 2-digit years (e.g., "24" -> 2024)
                 const fullYear = y < 100 ? 2000 + y : y;
                 
                 let payMonth = m;
@@ -81,7 +120,8 @@
             return res;
         };
 
-        const extractData = (text, vendorId) => {
+        // 3. Line-based Data Extractor
+        const extractData = (lines, vendorId) => {
             let data = {
                 vendor: 'Boise Cascade', invoiceNumber: '', date: '', poNumber: '',
                 jobName: '', total: '', paymentTerms: '', orderDate: '', shipDate: '',
@@ -89,30 +129,49 @@
             };
 
             if (vendorId === 'boise') {
-                const match = (regex, idx=1) => (text.match(regex) || [])[idx] || '';
-                
-                // Header Info
-                data.invoiceNumber = match(/HS\d{10}-\d{3}|HS\d+-\d+/, 0);
-                data.date = match(/Invoice Date:[\s\S]*?(\d{2}\/\d{2}\/\d{2})/i) || match(/(\d{2}\/\d{2}\/\d{2})/, 1);
-                
-                // Account & Branch extraction
-                data.account = match(/Account:[\s\S]*?([A-Z0-9]+\s\d{4})/i);
-                data.branch = match(/Branch:[\s\S]*?([A-Z]+)/i);
+                // Helper to safely find a value in a line
+                const findVal = (trigger, splitChar = ':') => {
+                    const line = lines.find(l => l.toLowerCase().includes(trigger.toLowerCase()));
+                    if (!line) return '';
+                    // Split by char and take the right side. 
+                    // e.g. "PO: 12345" -> ["PO", " 12345"] -> "12345"
+                    const parts = line.split(splitChar);
+                    return parts.length > 1 ? parts.slice(1).join(splitChar).trim() : '';
+                };
 
-                // Order Details
-                data.poNumber = match(/PO:\s*(\d+)/i);
-                data.orderDate = match(/ORDER DATE:\s*(\d{2}\/\d{2}\/\d{2})/i);
-                data.shipDate = match(/SHIP DATE:\s*(\d{2}\/\d{2}\/\d{2})/i);
+                // --- Header Info ---
+                data.account = findVal("Account");
+                data.branch = findVal("Branch");
+                
+                // Invoice Number: Look for line with "Invoice" that has digits
+                const invLine = lines.find(l => (l.includes("Invoice") || l.includes("Inv")) && /\d/.test(l));
+                if (invLine) {
+                    // Try to grab just the number part
+                    data.invoiceNumber = (invLine.match(/HS\d{10}-\d{3}|HS\d+-\d+/) || [])[0] || findVal("Invoice No");
+                }
+                
+                // Date
+                const dateLine = lines.find(l => l.toLowerCase().includes("invoice date"));
+                if (dateLine) data.date = (dateLine.match(/\d{2}\/\d{2}\/\d{2}/) || [])[0] || '';
 
-                // STRICT JOB REGEX
-                data.jobName = match(/JOB:\s*(.*?)(?=\s*(SHIP|VIA|Page|REF|ORDER|SALES|PO|DATE|TERMS|$))/i).trim();
+                // --- Order Details ---
+                data.poNumber = findVal("PO", ":") || findVal("P.O.");
+                data.orderDate = findVal("ORDER DATE");
+                data.shipDate = findVal("SHIP DATE");
+                data.jobName = findVal("JOB"); // Much safer now!
+
+                // --- Financials ---
+                // Find line with "Balance" or "Total" containing a $ sign
+                const totalLine = lines.find(l => (l.toLowerCase().includes("balance") || l.toLowerCase().includes("total")) && l.includes("$"));
+                if (totalLine) {
+                    data.total = (totalLine.match(/\$[\d,]+\.\d{2}/) || [])[0] || '';
+                }
+
+                data.paymentTerms = findVal("PAYMENT TERMS");
                 
-                // Financials
-                data.total = match(/Balance\s*"?\$([\d,]+\.\d{2})"?/i);
-                data.paymentTerms = match(/PAYMENT TERMS:\s*([\s\S]*?)(?=\s*(EMAILED|You may deduct|$))/i).replace(/\n/g, ' ').trim();
-                
-                // Deduction line
-                data.deductionLine = match(/(You may deduct.*?\(ADF.*?\))/i, 1).replace(/\n/g, ' ').trim();
+                // Deduction Line
+                const deductLine = lines.find(l => l.includes("You may deduct") || (l.includes("ADF") && l.includes("deduct")));
+                if (deductLine) data.deductionLine = deductLine;
             }
             return data;
         };
@@ -136,9 +195,12 @@
                     const viewport = page.getViewport({ scale: 1.5 });
                     const canvas = canvasRef.current;
                     const context = canvas.getContext('2d');
+                    
+                    // Responsive scaling
                     const containerWidth = canvas.parentElement.clientWidth;
                     const scale = (containerWidth - 32) / viewport.width; 
                     const scaledViewport = page.getViewport({ scale: scale > 0 ? scale : 1 });
+                    
                     canvas.height = scaledViewport.height;
                     canvas.width = scaledViewport.width;
                     await page.render({ canvasContext: context, viewport: scaledViewport }).promise;
@@ -200,15 +262,22 @@
                 try {
                     const buffer = await file.arrayBuffer();
                     const pdf = await pdfjsLib.getDocument(buffer).promise;
-                    let fullText = '';
-                    for (let i = 1; i <= pdf.numPages; i++) {
-                        const page = await pdf.getPage(i);
-                        const txt = await page.getTextContent();
-                        fullText += txt.items.map(s => s.str).join(' ') + '\n';
-                    }
-                    setExtractedData(extractData(fullText, 'boise'));
+                    
+                    // --- NEW SPATIAL LOGIC ---
+                    const page = await pdf.getPage(1);
+                    const lines = await organizePDFTextByRow(page);
+                    
+                    // Debug: See what the computer sees
+                    console.log("Scanned Lines:", lines);
+
+                    setExtractedData(extractData(lines, 'boise'));
                     setStep('review');
-                } catch (e) { console.error(e); alert("Error reading PDF"); }
+                    // -------------------------
+
+                } catch (e) { 
+                    console.error(e); 
+                    alert("Error reading PDF: " + e.message); 
+                }
                 setIsProcessing(false);
             };
 
@@ -269,11 +338,11 @@
                                     <div className="p-4 bg-green-100 text-green-700 rounded-xl group-hover:scale-110 transition-transform"><Icon name="tree-pine" size={32} /></div>
                                     <div>
                                         <div className="font-bold text-xl text-slate-800">Boise Cascade</div>
-                                        <div className="text-sm text-slate-400 mt-1">Auto-detect logic active</div>
+                                        <div className="text-sm text-slate-400 mt-1">Spatial Logic Active</div>
                                     </div>
                                     <Icon name="chevron-right" className="ml-auto text-slate-300 group-hover:text-blue-500" size={24} />
                                 </button>
-                                {isProcessing && <div className="mt-10 text-xl text-blue-600 flex items-center gap-3 font-medium"><Icon name="loader-2" className="animate-spin" size={24} /> Scanning Document...</div>}
+                                {isProcessing && <div className="mt-10 text-xl text-blue-600 flex items-center gap-3 font-medium"><Icon name="loader-2" className="animate-spin" size={24} /> Analyzing Document Layout...</div>}
                             </div>
                         )}
 
@@ -369,13 +438,13 @@
                             <div className="mb-8 grid grid-cols-2 gap-6">
                                 <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center shadow-sm">
                                     <div className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Early Pay (1%)</div>
-                                    <div className="text-2xl font-bold text-green-700">{calc.discountTotal}</div>
-                                    <div className="text-xs font-medium text-green-600 mt-1">Due {calc.discountDate}</div>
+                                    <div className="text-2xl font-bold text-green-700">{calc.discountTotal || "---"}</div>
+                                    <div className="text-xs font-medium text-green-600 mt-1">Due {calc.discountDate || "--/--/--"}</div>
                                 </div>
                                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-center shadow-sm opacity-70">
                                     <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Standard Net</div>
-                                    <div className="text-2xl font-bold text-slate-600">{calc.netTotal}</div>
-                                    <div className="text-xs font-medium text-slate-400 mt-1">Due {calc.netDate}</div>
+                                    <div className="text-2xl font-bold text-slate-600">{calc.netTotal || "---"}</div>
+                                    <div className="text-xs font-medium text-slate-400 mt-1">Due {calc.netDate || "--/--/--"}</div>
                                 </div>
                             </div>
 
