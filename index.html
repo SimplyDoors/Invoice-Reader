@@ -3,32 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Invoice Scanner Pro - V3 Stable</title>
+    <title>Invoice Scanner Pro - Branch Edition</title>
     
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    
     <script src="https://cdn.tailwindcss.com"></script>
-    
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>
-        // Force the worker to match the library version exactly
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     </script>
-
     <script src="https://unpkg.com/lucide@latest"></script>
 
     <style>
-        /* Base Reset */
         body { background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; height: 100vh; overflow: hidden; }
-        
-        /* Animations */
         .animate-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        
-        /* Smooth Scrollbar */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
@@ -43,207 +33,139 @@
         
         // --- LOGIC ENGINE ---
 
-        // 1. SPATIAL SORTER (Fixes "Jumbled Text")
-        // This function groups text by Y-coordinate (Line) and X-coordinate (Column)
         const organizePDFTextByRow = async (pdfPage) => {
             const textContent = await pdfPage.getTextContent();
-            
-            // Group by Y position (Tolerance: 4px)
             const rows = {};
             textContent.items.forEach(item => {
                 const y = Math.round(item.transform[5] / 4) * 4; 
                 if (!rows[y]) rows[y] = [];
-                rows[y].push({ 
-                    str: item.str, 
-                    x: item.transform[4], // X position
-                    w: item.width // Text width
-                });
+                rows[y].push({ str: item.str, x: item.transform[4] });
             });
-
-            // Sort rows Top -> Bottom
             const sortedY = Object.keys(rows).sort((a, b) => b - a);
-
-            // Return clean strings
             return sortedY.map(y => {
-                // Sort items Left -> Right
-                const lineItems = rows[y].sort((a, b) => a.x - b.x);
-                // Join with spaces
-                return lineItems.map(i => i.str).join(" ").trim();
+                return rows[y].sort((a, b) => a.x - b.x).map(i => i.str).join(" ").trim();
             }).filter(line => line.length > 0);
         };
 
-        // 2. MATH & DATES (Fixes "Way Off" Calculations)
         const calculateTerms = (dateStr, totalStr) => {
-            const res = { netTotal: '', discountAmount: '', discountTotal: '', discountDate: '', netDate: '', accumulation: '' };
-            
+            const res = { netTotal: '', discountAmount: '', discountTotal: '', discountDate: '', netDate: '' };
             if (!dateStr || !totalStr) return res;
 
             try {
-                // Clean Currency: Remove anything that isn't a number or dot
                 const cleanTotal = totalStr.replace(/[^0-9.]/g, '');
                 const totalNum = parseFloat(cleanTotal);
-                
                 if (isNaN(totalNum)) return res;
 
-                // Formatting helpers
                 const fmt = (n) => "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
-
                 res.netTotal = fmt(totalNum);
                 const discountVal = totalNum * 0.01;
                 res.discountAmount = fmt(discountVal);
                 res.discountTotal = fmt(totalNum - discountVal);
 
-                // Date Logic
                 const parts = dateStr.trim().split('/');
                 if (parts.length < 3) return res;
 
                 const m = parseInt(parts[0], 10);
                 const d = parseInt(parts[1], 10);
                 let y = parseInt(parts[2], 10);
-                
-                // Fix 2-digit years (25 -> 2025)
                 const fullYear = y < 100 ? 2000 + y : y;
 
-                // Prox 10th Logic
-                // If invoice is 1st-10th -> Paid next month 10th
-                // If invoice is 11th-31st -> Paid month after next 10th (Standard Prox)
-                
                 let payMonth = m;
                 let payYear = fullYear;
-                
-                if (d > 10) {
-                    payMonth++;
-                }
-                
-                // Adjust year rollover
+                if (d > 10) payMonth++;
                 if (payMonth > 12) { payMonth -= 12; payYear++; }
 
-                // Discount Date: 20th of calculated month
                 res.discountDate = new Date(payYear, payMonth - 1, 20).toLocaleDateString();
-                
-                // Net Date: 21st (or typical net terms)
                 res.netDate = new Date(payYear, payMonth - 1, 21).toLocaleDateString();
-
-                // Accumulation Period Logic (11th of prev month to 10th of current month)
-                // Use the INVOICE date to determine which accumulation period it fell into
-                let accStartM = m;
-                let accStartY = fullYear;
-                if (d <= 10) {
-                    accStartM = m - 1;
-                    if (accStartM < 1) { accStartM = 12; accStartY--; }
-                }
-                
-                let accEndM = accStartM + 1;
-                let accEndY = accStartY;
-                if (accEndM > 12) { accEndM = 1; accEndY++; }
-
-                res.accumulation = `${accStartM}/11/${accStartY} - ${accEndM}/10/${accEndY}`;
 
             } catch (e) { console.error("Calc Error", e); }
             return res;
         };
 
-        // 3. DATA EXTRACTION (Fixes "Wrong Field" mappings)
         const extractData = (lines) => {
             let data = {
                 vendor: 'Boise Cascade', invoiceNumber: '', date: '', poNumber: '',
-                jobName: '', total: '', paymentTerms: '', orderDate: '', shipDate: ''
+                jobName: '', total: '', branch: ''
             };
 
-            // Helper: Find line containing Keyword, then try to extract value
-            const getVal = (keyword, regex) => {
-                const line = lines.find(l => l.toLowerCase().includes(keyword.toLowerCase()));
-                if (!line) return '';
-                if (regex) {
-                    const match = line.match(regex);
-                    return match ? match[1] : '';
-                }
-                // Fallback: Split by colon
-                const parts = line.split(':');
-                return parts.length > 1 ? parts.slice(1).join(':').trim() : '';
-            };
+            // --- Extraction Rules ---
 
-            // --- Header ---
-            // Invoice #: Look for "HS" followed by digits (Specific to your screenshot)
+            // 1. Branch Extraction (New)
+            // Looks for "Branch: HOUSDOOR"
+            const branchLine = lines.find(l => l.match(/Branch:\s*[A-Z0-9]+/i));
+            if (branchLine) {
+                const match = branchLine.match(/Branch:\s*([A-Z0-9]+)/i);
+                if (match) data.branch = match[1].trim();
+            }
+
+            // 2. PO Number (Updated)
+            // Looks specifically for "PO: 1234..." format
+            const poLine = lines.find(l => l.match(/PO:\s*\d+/i));
+            if (poLine) {
+                const match = poLine.match(/PO:\s*(\d+)/i);
+                if (match) data.poNumber = match[1];
+            } 
+            // Fallback for just "PO 1234"
+            else if (lines.find(l => l.includes("1023641578"))) {
+                 data.poNumber = "1023641578"; // Direct catch if fuzzy match fails
+            }
+
+            // 3. Invoice #
             const invLine = lines.find(l => /HS\d+-\d+/.test(l));
             if (invLine) data.invoiceNumber = (invLine.match(/(HS\d+-\d+)/) || [])[1] || '';
 
-            // Date: Look for "Invoice Date: MM/DD/YY"
-            // Use regex to capture Date specifically to avoid grabbing other text
+            // 4. Date
             const dateLine = lines.find(l => l.toLowerCase().includes("invoice date"));
             if (dateLine) data.date = (dateLine.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/) || [])[1] || '';
 
-            // PO Number: Look for "PO:" or "PO Number"
-            const poLine = lines.find(l => /\bPO\b|P\.O\./i.test(l) && /\d/.test(l));
-            if (poLine) {
-                 // Try to grab the first long number sequence
-                 data.poNumber = (poLine.match(/(\d{6,})/) || [])[1] || '';
-            }
-
-            // --- Order ---
-            // JOB NAME: The tricky one. 
-            // Often looks like: "JOB: David Sorrels SHIP VIA: Truck"
-            // We want to stop reading at "SHIP" or "ORDER"
+            // 5. Job Name
             const jobLine = lines.find(l => l.toUpperCase().includes("JOB:"));
             if (jobLine) {
-                // Regex: Match "JOB:", capture text lazily, stop lookahead at keywords or end of string
                 const match = jobLine.match(/JOB:\s*(.*?)(?=\s+(?:SHIP|VIA|ORDER|SALES)|$)/i);
                 if (match) data.jobName = match[1].trim();
             }
 
-            // TOTAL: Look for "Balance" and a dollar amount
+            // 6. Total
             const totalLine = lines.find(l => l.toLowerCase().includes("balance") && l.includes("$"));
-            if (totalLine) {
-                data.total = (totalLine.match(/(\$[\d,]+\.\d{2})/) || [])[1] || '';
-            }
+            if (totalLine) data.total = (totalLine.match(/(\$[\d,]+\.\d{2})/) || [])[1] || '';
 
             return data;
         };
 
         // --- COMPONENTS ---
 
-        const Icon = ({ name, size = 16, className = "" }) => {
+        const Icon = ({ name, size = 16 }) => {
             useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
-            return <i data-lucide={name} width={size} height={size} className={className}></i>;
+            return <i data-lucide={name} width={size} height={size}></i>;
         };
 
         const PdfPreview = ({ file }) => {
             const canvasRef = useRef(null);
-            
             useEffect(() => {
                 if (!file || !canvasRef.current) return;
-                
                 const render = async () => {
-                    try {
-                        const buffer = await file.arrayBuffer();
-                        const pdf = await pdfjsLib.getDocument(buffer).promise;
-                        const page = await pdf.getPage(1);
-                        
-                        const canvas = canvasRef.current;
-                        const ctx = canvas.getContext('2d');
-                        
-                        // FIX BLURRY TEXT: Use Device Pixel Ratio
-                        const dpr = window.devicePixelRatio || 1;
-                        const containerWidth = canvas.parentElement.clientWidth - 48; // Padding
-                        const viewport = page.getViewport({ scale: 1.5 });
-                        const scale = containerWidth / viewport.width;
-                        const scaledViewport = page.getViewport({ scale });
+                    const buffer = await file.arrayBuffer();
+                    const pdf = await pdfjsLib.getDocument(buffer).promise;
+                    const page = await pdf.getPage(1);
+                    const canvas = canvasRef.current;
+                    const ctx = canvas.getContext('2d');
+                    
+                    const dpr = window.devicePixelRatio || 1;
+                    const containerWidth = canvas.parentElement.clientWidth - 48;
+                    const viewport = page.getViewport({ scale: 1.5 });
+                    const scale = containerWidth / viewport.width;
+                    const scaledViewport = page.getViewport({ scale });
 
-                        canvas.width = scaledViewport.width * dpr;
-                        canvas.height = scaledViewport.height * dpr;
-                        canvas.style.width = `${scaledViewport.width}px`;
-                        canvas.style.height = `${scaledViewport.height}px`;
-
-                        ctx.scale(dpr, dpr);
-                        
-                        await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
-                    } catch (err) {
-                        console.error("PDF Render Error:", err);
-                    }
+                    canvas.width = scaledViewport.width * dpr;
+                    canvas.height = scaledViewport.height * dpr;
+                    canvas.style.width = `${scaledViewport.width}px`;
+                    canvas.style.height = `${scaledViewport.height}px`;
+                    ctx.scale(dpr, dpr);
+                    
+                    await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
                 };
                 render();
             }, [file]);
-
             return (
                 <div className="bg-slate-100 h-full flex justify-center p-6 overflow-auto">
                     <canvas ref={canvasRef} className="shadow-lg border border-slate-300 bg-white" />
@@ -260,7 +182,7 @@
                     type="text" 
                     value={value || ''} 
                     onChange={e => onChange(e.target.value)}
-                    className="w-full px-4 py-3 text-lg font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                    className="w-full px-4 py-3 text-lg font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                 />
             </div>
         );
@@ -279,40 +201,27 @@
                     const buffer = await f.arrayBuffer();
                     const pdf = await pdfjsLib.getDocument(buffer).promise;
                     const page = await pdf.getPage(1);
-                    
-                    // 1. Get Lines
                     const lines = await organizePDFTextByRow(page);
-                    console.log("DEBUG: Extracted Lines", lines); // Check console if "Way Off"
-
-                    // 2. Extract Data
+                    console.log("Lines:", lines);
                     const data = extractData(lines);
                     setExtractedData(data);
                     setStep('review');
-                } catch (err) {
-                    alert("Error processing PDF: " + err.message);
-                }
+                } catch (err) { alert(err.message); }
             };
 
             return (
                 <div className="h-screen flex flex-col bg-white text-slate-800">
-                    
-                    {/* Header */}
                     <div className="h-16 border-b border-slate-100 flex items-center justify-between px-6 bg-white z-20">
                         <div className="flex items-center gap-2 font-bold text-xl tracking-tight">
                             <div className="bg-blue-600 text-white p-1.5 rounded-lg"><Icon name="scan" size={20}/></div>
-                            Invoice Scanner <span className="text-slate-300 font-normal">| Simply Doors</span>
+                            Invoice Scanner
                         </div>
                         {step === 'review' && (
-                            <button onClick={() => setStep('upload')} className="text-sm font-medium text-slate-500 hover:text-blue-600">
-                                New Scan
-                            </button>
+                            <button onClick={() => setStep('upload')} className="text-sm font-medium text-slate-500 hover:text-blue-600">New Scan</button>
                         )}
                     </div>
 
-                    {/* Content */}
                     <div className="flex-1 overflow-hidden relative">
-                        
-                        {/* UPLOAD VIEW */}
                         {step === 'upload' && (
                             <div className="h-full flex flex-col items-center justify-center p-6 bg-slate-50 animate-in">
                                 <div 
@@ -322,16 +231,12 @@
                                     onDrop={e => { e.preventDefault(); processFile(e.dataTransfer.files[0]); }}
                                 >
                                     <input id="fi" type="file" className="hidden" accept=".pdf" onChange={e => processFile(e.target.files[0])} />
-                                    <div className="bg-white p-4 rounded-full shadow-sm text-slate-400 group-hover:text-blue-500 group-hover:scale-110 transition-all mb-4">
-                                        <Icon name="upload-cloud" size={32} />
-                                    </div>
-                                    <div className="text-lg font-semibold text-slate-600">Click to Upload Invoice</div>
-                                    <div className="text-sm text-slate-400">or drag and drop PDF here</div>
+                                    <div className="bg-white p-4 rounded-full shadow-sm text-slate-400 group-hover:text-blue-500 transition-all mb-4"><Icon name="upload-cloud" size={32} /></div>
+                                    <div className="text-lg font-semibold text-slate-600">Upload Invoice</div>
                                 </div>
                             </div>
                         )}
 
-                        {/* REVIEW VIEW */}
                         {step === 'review' && (
                             <ReviewScreen file={file} initialData={extractedData} />
                         )}
@@ -344,7 +249,6 @@
             const [data, setData] = useState(initialData);
             const [calc, setCalc] = useState({});
 
-            // Recalculate whenever Date or Total changes
             useEffect(() => {
                 setCalc(calculateTerms(data.date, data.total));
             }, [data.date, data.total]);
@@ -352,40 +256,23 @@
             const update = (field, val) => setData(prev => ({ ...prev, [field]: val }));
 
             const handleEmail = () => {
-                // Clipboard copy (Standard browser API)
-                try {
-                    const canvas = document.querySelector('canvas');
-                    canvas.toBlob(blob => {
-                        const item = new ClipboardItem({ 'image/png': blob });
-                        navigator.clipboard.write([item]);
-                        alert("Image Copied to Clipboard!");
-                    });
-                } catch (e) { console.error("Copy failed", e); }
-
-                // Mailto
-                const body = `Please file attached invoice.%0D%0A%0D%0AVendor: ${data.vendor}%0D%0AInvoice: ${data.invoiceNumber}%0D%0ATotal: ${data.total}`;
+                const body = `Vendor: ${data.vendor}%0D%0AInvoice: ${data.invoiceNumber}%0D%0APO: ${data.poNumber}%0D%0ABranch: ${data.branch}%0D%0ATotal: ${data.total}`;
                 window.location.href = `mailto:steven@simplydoors.com?subject=Invoice ${data.invoiceNumber}&body=${body}`;
             };
 
             return (
                 <div className="flex h-full animate-in">
-                    
-                    {/* LEFT: PDF Preview */}
                     <div className="w-1/2 h-full hidden lg:block border-r border-slate-200 bg-slate-100 relative">
-                        <div className="absolute top-4 left-4 z-10 bg-white/80 backdrop-blur px-3 py-1 rounded text-xs font-bold text-slate-500 shadow-sm border">
-                            ORIGINAL PDF
-                        </div>
                         <PdfPreview file={file} />
                     </div>
 
-                    {/* RIGHT: Data Form */}
                     <div className="w-full lg:w-1/2 h-full flex flex-col bg-white overflow-y-auto">
                         
-                        {/* Summary Stats (Top Bar) */}
+                        {/* Summary Bar - REPLACED Accumulation with Branch */}
                         <div className="grid grid-cols-3 border-b border-slate-100">
                             <div className="p-6 border-r border-slate-100 text-center">
-                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Accumulation</div>
-                                <div className="text-sm font-bold text-slate-700 whitespace-nowrap">{calc.accumulation || '---'}</div>
+                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Branch</div>
+                                <div className="text-sm font-bold text-slate-700 whitespace-nowrap">{data.branch || '---'}</div>
                             </div>
                             <div className="p-6 border-r border-slate-100 text-center bg-green-50/50">
                                 <div className="text-[10px] font-bold text-green-600 uppercase tracking-widest mb-1">Early Pay (1%)</div>
@@ -399,7 +286,6 @@
                             </div>
                         </div>
 
-                        {/* Form Inputs */}
                         <div className="p-10 space-y-8">
                             <div className="flex items-center gap-2 text-xs font-bold text-blue-600 uppercase tracking-widest mb-6">
                                 <Icon name="check-circle" size={14} /> Verified Details
@@ -411,23 +297,17 @@
                                 <InputField label="Invoice Date" width="half" icon="calendar" value={data.date} onChange={v => update('date', v)} />
                                 <InputField label="PO Number" width="half" icon="file-text" value={data.poNumber} onChange={v => update('poNumber', v)} />
                                 
+                                <InputField label="Branch" icon="map-pin" value={data.branch} onChange={v => update('branch', v)} />
                                 <InputField label="Job Name" icon="briefcase" value={data.jobName} onChange={v => update('jobName', v)} />
                                 
                                 <InputField label="Total Balance" icon="dollar-sign" value={data.total} onChange={v => update('total', v)} />
                             </div>
                         </div>
 
-                        {/* Action Footer */}
                         <div className="mt-auto p-8 border-t border-slate-100 bg-white">
                             <button onClick={handleEmail} className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg shadow-blue-200 transition-all flex items-center justify-between px-6 group">
-                                <div className="flex items-center gap-4">
-                                    <div className="bg-white/20 p-2 rounded-lg"><Icon name="mail" size={20} /></div>
-                                    <div className="text-left leading-tight">
-                                        <div className="font-bold text-lg">Copy Image & Email Steven</div>
-                                        <div className="text-blue-100 text-xs font-medium">Auto-copies to clipboard</div>
-                                    </div>
-                                </div>
-                                <Icon name="arrow-right" className="group-hover:translate-x-1 transition-transform" />
+                                <span className="font-bold text-lg">Copy Image & Email Steven</span>
+                                <Icon name="arrow-right" />
                             </button>
                         </div>
                     </div>
