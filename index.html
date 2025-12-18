@@ -33,6 +33,13 @@
         
         // --- LOGIC ENGINE ---
 
+        // 1. Shared Tools
+        const safeMatch = (line, regex) => {
+            if (!line) return '';
+            const match = line.match(regex);
+            return match ? match[1] : '';
+        };
+
         const organizePDFTextByRow = async (pdfPage) => {
             const textContent = await pdfPage.getTextContent();
             const rows = {};
@@ -47,9 +54,11 @@
             }).filter(line => line.length > 0);
         };
 
+        // NEW: Updated Detector for 3 Vendors
         const detectVendor = (lines) => {
             const fullText = lines.join(" ").toLowerCase();
             if (fullText.includes("woodgrain")) return 'woodgrain';
+            if (fullText.includes("elevate") || fullText.includes("elevatewindows")) return 'elevate';
             return 'boise'; // Default
         };
 
@@ -67,7 +76,9 @@
 
                 // --- VENDOR SPECIFIC DISCOUNT ---
                 let discountRate = 0;
-                if (vendor === 'boise') {
+                
+                // Boise & Elevate get 1% discount
+                if (vendor === 'boise' || vendor === 'elevate') {
                     discountRate = 0.01;
                 } else if (vendor === 'woodgrain') {
                     discountRate = 0.00; 
@@ -105,38 +116,30 @@
                 jobName: '', total: '', branch: '', orderDate: '', shipDate: ''
             };
 
-            const safeMatch = (line, regex) => {
-                const match = line ? line.match(regex) : null;
-                return match ? match[1] : '';
-            };
-
             const branchLine = lines.find(l => l.match(/Branch:\s*[A-Z0-9]+/i));
-            if (branchLine) data.branch = safeMatch(branchLine, /Branch:\s*([A-Z0-9]+)/i);
+            data.branch = safeMatch(branchLine, /Branch:\s*([A-Z0-9]+)/i);
 
             const poLine = lines.find(l => l.match(/PO:\s*\d+/i));
             if (poLine) data.poNumber = safeMatch(poLine, /PO:\s*(\d+)/i);
             else if (lines.find(l => l.includes("1023641578"))) data.poNumber = "1023641578";
 
             const invLine = lines.find(l => /HS\d+-\d+/.test(l));
-            if (invLine) data.invoiceNumber = safeMatch(invLine, /(HS\d+-\d+)/);
+            data.invoiceNumber = safeMatch(invLine, /(HS\d+-\d+)/);
 
             const dateLine = lines.find(l => l.toLowerCase().includes("invoice date"));
-            if (dateLine) data.date = safeMatch(dateLine, /(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+            data.date = safeMatch(dateLine, /(\d{1,2}\/\d{1,2}\/\d{2,4})/);
 
             const orderDateLine = lines.find(l => l.toUpperCase().includes("ORDER DATE"));
-            if (orderDateLine) data.orderDate = safeMatch(orderDateLine, /ORDER DATE:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+            data.orderDate = safeMatch(orderDateLine, /ORDER DATE:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
 
             const shipDateLine = lines.find(l => l.toUpperCase().includes("SHIP DATE"));
-            if (shipDateLine) data.shipDate = safeMatch(shipDateLine, /SHIP DATE:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+            data.shipDate = safeMatch(shipDateLine, /SHIP DATE:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
 
             const jobLine = lines.find(l => l.toUpperCase().includes("JOB:"));
-            if (jobLine) {
-                const match = jobLine.match(/JOB:\s*(.*?)(?=\s+(?:SHIP|VIA|ORDER|SALES)|$)/i);
-                if (match) data.jobName = match[1].trim();
-            }
+            data.jobName = safeMatch(jobLine, /JOB:\s*(.*?)(?=\s+(?:SHIP|VIA|ORDER|SALES)|$)/i).trim();
 
             const totalLine = lines.find(l => l.toLowerCase().includes("balance") && l.includes("$"));
-            if (totalLine) data.total = safeMatch(totalLine, /(\$[\d,]+\.\d{2})/);
+            data.total = safeMatch(totalLine, /(\$[\d,]+\.\d{2})/);
 
             return data;
         };
@@ -148,11 +151,6 @@
                 jobName: '', total: '', branch: 'Farmers Branch', orderDate: '', shipDate: ''
             };
 
-            const safeMatch = (line, regex) => {
-                const match = line ? line.match(regex) : null;
-                return match ? match[1] : '';
-            };
-
             const invLine = lines.find(l => /\d{8}-\d{2}/.test(l));
             data.invoiceNumber = safeMatch(invLine, /(\d{8}-\d{2})/);
 
@@ -162,9 +160,8 @@
             const poLine = lines.find(l => /1023\d+/.test(l));
             data.poNumber = safeMatch(poLine, /(1023\d+[-\w]*)/);
 
-            const shipLine = lines.find(l => l.includes("OUR TRUCK") || l.includes("CASH ADVANCE") || (l.includes("SHIPPED") && /\d/.test(l)));
+            const shipLine = lines.find(l => l.includes("SHIPPED") || l.includes("OUR TRUCK") || l.includes("CASH ADVANCE"));
             data.shipDate = safeMatch(shipLine, /(\d{2}\/\d{2}\/\d{2})/);
-            
             if (!data.orderDate) data.orderDate = data.shipDate;
 
             const totalLine = lines.find(l => l.includes("Invoice Total") || l.includes("Total:"));
@@ -174,7 +171,51 @@
                      data.total = "$" + matches[matches.length - 1];
                  }
             }
-            
+            return data;
+        };
+
+        // --- STRATEGY 3: ELEVATE WINDOWS (FIXED) ---
+        const extractElevate = (lines) => {
+            let data = {
+                vendor: 'Elevate Windows', invoiceNumber: '', date: '', poNumber: '',
+                jobName: '', total: '', branch: 'Grand Prairie', orderDate: '', shipDate: ''
+            };
+
+            // 1. Invoice Number 
+            const invLine = lines.find(l => l.includes("INVOICE:") && /\d{6}/.test(l));
+            data.invoiceNumber = safeMatch(invLine, /INVOICE:?\s*(\d+)/);
+
+            // 2. Invoice Date & PO from Main Row
+            const mainRow = lines.find(l => l.includes("1% 15 NET 30") || l.includes("NET 30"));
+            if (mainRow) {
+                data.date = safeMatch(mainRow, /(\d{1,2}\/\d{1,2}\/\d{4})/);
+                data.poNumber = safeMatch(mainRow, /(1023\d+)/);
+                const parts = mainRow.split(/1023\d+/); 
+                if (parts.length > 1) {
+                    let jobPart = parts[1].split(/1%|NET 30/)[0];
+                    data.jobName = jobPart.trim();
+                }
+            }
+
+            // 4. Dates
+            const orderLine = lines.find(l => l.includes("ORDER DATE:"));
+            data.orderDate = safeMatch(orderLine, /ORDER DATE:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/);
+
+            const loadLine = lines.find(l => l.includes("LOAD DATE:"));
+            data.shipDate = safeMatch(loadLine, /LOAD DATE:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/);
+
+            // 6. Total (FIXED)
+            // Look for "TOTAL:" anywhere in the line, not just at the start.
+            // Some invoices have "web" or other noise before "TOTAL:"
+            const totalLine = lines.find(l => l.includes("TOTAL:") && l.includes("$"));
+            if (totalLine) {
+                // Grab the LAST price-like string on the line
+                const prices = totalLine.match(/(\$[\d,]+\.\d{2})/g);
+                if (prices && prices.length > 0) {
+                    data.total = prices[prices.length - 1];
+                }
+            }
+
             return data;
         };
 
@@ -199,6 +240,8 @@
                     let data = {};
                     if (vendorId === 'woodgrain') {
                         data = extractWoodgrain(lines);
+                    } else if (vendorId === 'elevate') {
+                        data = extractElevate(lines);
                     } else {
                         data = extractBoise(lines);
                     }
@@ -248,10 +291,17 @@
             const [data, setData] = useState(initialData);
             const [calc, setCalc] = useState({});
 
+            // Check vendor for UI logic
             const isWoodgrain = (data.vendor || '').toLowerCase().includes('woodgrain');
+            const isElevate = (data.vendor || '').toLowerCase().includes('elevate');
+            
+            // Woodgrain is the ONLY one without Early Pay.
+            const showEarlyPay = !isWoodgrain;
 
             useEffect(() => {
-                const vendorKey = isWoodgrain ? 'woodgrain' : 'boise';
+                let vendorKey = 'boise';
+                if (isWoodgrain) vendorKey = 'woodgrain';
+                if (isElevate) vendorKey = 'elevate';
                 setCalc(calculateTerms(data.date, data.total, vendorKey));
             }, [data.date, data.total, data.vendor]);
 
@@ -261,15 +311,10 @@
                 const triggerGmail = () => {
                     const sub = "New Invoice Scanner Submittal";
                     
-                    // --- CONDITIONAL EMAIL BODY ---
                     let paymentLines = [];
                     if (isWoodgrain) {
-                         // Woodgrain: Single line, plain "Invoice Amount"
-                         paymentLines = [
-                             `Invoice Amount: ${calc.netTotal || '$0.00'}`
-                         ];
+                         paymentLines = [ `Invoice Amount: ${calc.netTotal || '$0.00'}` ];
                     } else {
-                         // Boise: Both lines
                          paymentLines = [
                              `Early Pay: ${calc.discountTotal || '$0.00'}`,
                              `Standard Net Pay: ${calc.netTotal || '$0.00'}`
@@ -325,14 +370,13 @@
                     <div className="w-full lg:w-1/2 h-full flex flex-col bg-white overflow-y-auto">
                         
                         {/* Summary Bar - CONDITIONAL LAYOUT */}
-                        <div className={`grid ${isWoodgrain ? 'grid-cols-2' : 'grid-cols-3'} border-b border-slate-100`}>
+                        <div className={`grid ${showEarlyPay ? 'grid-cols-3' : 'grid-cols-2'} border-b border-slate-100`}>
                             <div className="p-6 border-r border-slate-100 text-center">
                                 <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Invoice Date</div>
                                 <div className="text-sm font-bold text-slate-700 whitespace-nowrap">{data.date || '---'}</div>
                             </div>
                             
-                            {/* HIDE EARLY PAY FOR WOODGRAIN */}
-                            {!isWoodgrain && (
+                            {showEarlyPay && (
                                 <div className="p-6 border-r border-slate-100 text-center bg-green-50/50">
                                     <div className="text-[10px] font-bold text-green-600 uppercase tracking-widest mb-1">Early Pay (1%)</div>
                                     <div className="text-xl font-bold text-green-700">{calc.discountTotal || '$0.00'}</div>
@@ -341,7 +385,7 @@
                             )}
 
                             <div className="p-6 text-center">
-                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{isWoodgrain ? 'Invoice Amount' : 'Standard Net'}</div>
+                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{!showEarlyPay ? 'Invoice Amount' : 'Standard Net'}</div>
                                 <div className="text-xl font-bold text-slate-600">{calc.netTotal || '$0.00'}</div>
                                 <div className="text-[10px] text-slate-400 font-medium mt-1">Due {calc.netDate}</div>
                             </div>
