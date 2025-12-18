@@ -33,12 +33,14 @@
         
         // --- LOGIC ENGINE ---
 
+        // Helper: Prevents crashes if regex doesn't find a match
         const safeMatch = (line, regex) => {
             if (!line) return '';
             const match = line.match(regex);
             return match ? match[1] : '';
         };
 
+        // Helper: Reads ALL pages of the PDF to ensure we don't miss data on page 2+
         const organizePDFTextByRow = async (pdf) => {
             let allLines = [];
             for (let i = 1; i <= pdf.numPages; i++) {
@@ -59,6 +61,7 @@
             return allLines;
         };
 
+        // Determines which extraction strategy to use
         const detectVendor = (lines) => {
             const fullText = lines.join(" ").toLowerCase();
             if (fullText.includes("pamex")) return 'pamex';
@@ -80,6 +83,7 @@
                 res.netTotal = fmt(totalNum);
 
                 let discountRate = 0;
+                // Boise & Elevate get 1%, Woodgrain & Pamex get 0%
                 if (vendor === 'boise' || vendor === 'elevate') discountRate = 0.01;
                 else discountRate = 0.00;
 
@@ -107,7 +111,8 @@
             return res;
         };
 
-        // --- EXTRACTORS ---
+        // --- VENDOR STRATEGIES ---
+        
         const extractBoise = (lines) => {
             let data = { vendor: 'Boise Cascade', invoiceNumber: '', date: '', poNumber: '', jobName: '', total: '', branch: '', orderDate: '', shipDate: '', trackingNumber: '', shippingHandling: '' };
             const branchLine = lines.find(l => l.match(/Branch:\s*[A-Z0-9]+/i));
@@ -349,12 +354,12 @@
                 setCalc(calculateTerms(data.date, data.total, vendorKey));
             }, [data.date, data.total, data.vendor]);
 
-            // GENERATE IMAGE IN BACKGROUND ON LOAD
+            // GENERATE STITCHED IMAGE IN BACKGROUND
             useEffect(() => {
                 if(!pdfDoc) return;
                 const generateImage = async () => {
                     try {
-                        const scale = 1.5;
+                        const scale = 1.2; 
                         let totalHeight = 0;
                         let maxWidth = 0;
                         const pageData = [];
@@ -393,14 +398,46 @@
 
             const update = (field, val) => setData(prev => ({ ...prev, [field]: val }));
 
+            // 1. Copy Email Text Only (Backup)
+            const handleCopyText = () => {
+                let paymentLines = [];
+                if (!showEarlyPay) {
+                     paymentLines = [ `Invoice Amount: ${calc.netTotal || '$0.00'}` ];
+                } else {
+                     paymentLines = [
+                         `Early Pay: ${calc.discountTotal || '$0.00'}`,
+                         `Standard Net Pay: ${calc.netTotal || '$0.00'}`
+                         ];
+                }
+
+                const lines = [
+                    `Vendor: ${data.vendor}`,
+                    `Invoice: ${data.invoiceNumber}`,
+                    `PO: ${data.poNumber}`,
+                    `Branch: ${data.branch}`,
+                    `ORDER DATE: ${data.orderDate}`,
+                    `SHIP DATE: ${data.shipDate}`,
+                    data.trackingNumber ? `Tracking No: ${data.trackingNumber}` : '',
+                    data.shippingHandling ? `S & H: ${data.shippingHandling}` : '',
+                    ...paymentLines
+                ].filter(l => l !== '');
+
+                const body = lines.join('\n');
+                
+                navigator.clipboard.writeText(body).then(() => {
+                    alert("Email text copied! You can now paste it into Gmail.");
+                });
+            };
+
+            // 2. Main Action: Copy Image & Open Gmail
             const handleGmail = () => {
                 if (!imageBlob) return alert("Image still processing... please wait 2 seconds.");
                 
-                // 1. Copy Image (Instant)
+                // Copy Image
                 const item = new ClipboardItem({ 'image/png': imageBlob });
                 navigator.clipboard.write([item]).catch(e => console.warn("Clipboard failed", e));
 
-                // 2. Open Gmail (Clean URL)
+                // Generate Email Body
                 const sub = "New Invoice Scanner Submittal";
                 let paymentLines = [];
                 if (!showEarlyPay) {
@@ -427,6 +464,7 @@
                 ].filter(l => l !== '');
 
                 const body = lines.join('\n');
+                // CLEAN URL (No account forcing)
                 const baseUrl = "https://mail.google.com/mail/?view=cm&fs=1";
                 const finalUrl = `${baseUrl}&to=steven@simplydoors.com&su=${encodeURIComponent(sub)}&body=${encodeURIComponent(body)}`;
                 
@@ -504,7 +542,7 @@
                             {renderFields()}
                         </div>
 
-                        <div className="p-8 border-t border-slate-100 bg-white">
+                        <div className="p-8 border-t border-slate-100 bg-white flex flex-col gap-3">
                             <button 
                                 onClick={handleGmail} 
                                 disabled={!isReadyImage}
@@ -515,6 +553,13 @@
                                     <span className="text-xs text-red-100 font-medium">Draft to Steven</span>
                                     <Icon name="arrow-right" />
                                 </div>
+                            </button>
+                            
+                            <button 
+                                onClick={handleCopyText} 
+                                className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-medium transition-colors"
+                            >
+                                Copy Text Only (Backup)
                             </button>
                         </div>
                     </div>
